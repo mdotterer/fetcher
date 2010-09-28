@@ -1,3 +1,4 @@
+(RUBY_VERSION < '1.9.0') ? require('system_timer') : require('timeout')
 require File.dirname(__FILE__) + '/../vendor/plain_imap'
 
 module Fetcher
@@ -19,6 +20,7 @@ module Fetcher
       @port = options.delete(:port) || PORT
       @ssl = options.delete(:ssl)
       @use_login = options.delete(:use_login)
+      @in_folder = options.delete(:in_folder) || 'INBOX'
       @processed_folder = options.delete(:processed_folder)
       @error_folder = options.delete(:error_folder) || 'bogus'
       super(options)
@@ -26,17 +28,21 @@ module Fetcher
     
     # Open connection and login to server
     def establish_connection
-      @connection = Net::IMAP.new(@server, @port, @ssl)
-      if @use_login
-        @connection.login(@username, @password)
-      else
-        @connection.authenticate(@authentication, @username, @password)
-      end
+      timeout_call = (RUBY_VERSION < '1.9.0') ? "SystemTimer.timeout_after(15.seconds) do" : "Timeout::timeout(15) do"
+      
+      eval("#{timeout_call}
+              @connection = Net::IMAP.new(@server, @port, @ssl)
+              if @use_login
+                @connection.login(@username, @password)
+              else
+                @connection.authenticate(@authentication, @username, @password)
+              end
+            end")
     end
     
     # Retrieve messages from server
     def get_messages
-      @connection.select('INBOX')
+      @connection.select(@in_folder)
       @connection.uid_search(['ALL']).each do |uid|
         msg = @connection.uid_fetch(uid,'RFC822').first.attr['RFC822']
         begin
@@ -60,9 +66,13 @@ module Fetcher
     def close_connection
       @connection.expunge
       @connection.logout
-      @connection.disconnect
+      begin
+        @connection.disconnect unless @connection.disconnected?
+      rescue
+        Rails.logger.info("Fetcher: Remote closed connection before I could disconnect.")
+      end
     end
-    
+        
     def add_to_processed_folder(uid)
       create_mailbox(@processed_folder)
       @connection.uid_copy(uid, @processed_folder)
